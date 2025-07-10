@@ -8,7 +8,7 @@ struct GeocodeResult {
 }
 
 class AddressGeocoder {
-    func geocodeAddress(_ address: String, completion: @escaping (GeocodeResult?) -> Void) {
+    func geocodeAddress(_ address: String, dispatchGroup: DispatchGroup, completion: @escaping (GeocodeResult?) -> Void) {
         // Use Nominatim (OpenStreetMap) API for free geocoding
         let encodedAddress = address.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         let urlString = "https://nominatim.openstreetmap.org/search?format=json&q=\(encodedAddress)&limit=1"
@@ -19,7 +19,10 @@ class AddressGeocoder {
             return
         }
         
+        dispatchGroup.enter()
         let task = URLSession.shared.dataTask(with: url) { data, response, error in
+            defer { dispatchGroup.leave() }
+            
             if let error = error {
                 print("Network error for '\(address)': \(error.localizedDescription)")
                 completion(nil)
@@ -73,6 +76,7 @@ class AddressGeocoder {
         let outputQueue = DispatchQueue(label: "output", qos: .userInitiated)
         
         var results: [Int: String] = [:]
+        var validIndices: [Int] = []
         
         for (index, line) in lines.enumerated() {
             let components = line.components(separatedBy: ",")
@@ -89,6 +93,8 @@ class AddressGeocoder {
             
             let address = components.dropFirst().joined(separator: ",").trimmingCharacters(in: .whitespaces)
             
+            validIndices.append(index)
+            
             dispatchGroup.enter()
             queue.async {
                 semaphore.wait()
@@ -99,21 +105,18 @@ class AddressGeocoder {
                 
                 print("Geocoding \(index + 1)/\(lines.count): \(address)")
                 
-                self.geocodeAddress(address) { coordinate in
+                self.geocodeAddress(address, dispatchGroup: dispatchGroup) { coordinate in
                     let resultLine: String
                     if let coordinate = coordinate {
                         resultLine = "\(id),\"\(address)\",\(coordinate.latitude),\(coordinate.longitude)"
+                        print("✓ \(resultLine)")
                     } else {
                         resultLine = "\(id),\"\(address)\",,"
+                        print("✗ \(resultLine)")
                     }
                     
                     outputQueue.sync {
                         results[index] = resultLine
-                    }
-                    
-                    // Rate limiting to avoid API limits
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
-                        // Delay is handled by the completion, no need for Thread.sleep
                     }
                 }
             }
@@ -122,8 +125,8 @@ class AddressGeocoder {
         dispatchGroup.wait()
         
         // Sort results by original order and append to output
-        for i in 0..<lines.count {
-            if let resultLine = results[i] {
+        for index in validIndices.sorted() {
+            if let resultLine = results[index] {
                 outputLines.append(resultLine)
             }
         }
@@ -132,7 +135,7 @@ class AddressGeocoder {
         
         do {
             try outputString.write(toFile: outputPath, atomically: true, encoding: .utf8)
-            print("Successfully geocoded \(lines.count) addresses")
+            print("Successfully geocoded \(validIndices.count) addresses")
             print("Output written to: \(outputPath)")
         } catch {
             print("Error writing output file: \(error)")
